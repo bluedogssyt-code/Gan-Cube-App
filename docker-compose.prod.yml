@@ -1,0 +1,234 @@
+version: '3.9'
+
+services:
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: gan-cube-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl/certs:/etc/nginx/certs:ro
+      - ./nginx/logs:/var/log/nginx
+    environment:
+      - TZ=UTC
+      - NGINX_HOST=${NGINX_HOST:-localhost}
+      - NGINX_PORT=${NGINX_PORT:-80}
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - gan-cube-network
+    resources:
+      limits:
+        cpus: '1'
+        memory: 512M
+      reservations:
+        cpus: '0.5'
+        memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Node.js Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gan-cube-app
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - MONGODB_URI=mongodb://mongo:27017/${MONGO_DB_NAME:-gan_cube_db}
+      - REDIS_URL=redis://redis:6379/${REDIS_DB:-0}
+      - ML_SERVER_URL=http://ml-server:8000
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRY=${JWT_EXPIRY:-24h}
+      - API_KEY=${API_KEY}
+      - CORS_ORIGIN=${CORS_ORIGIN:-https://example.com}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS:-900000}
+      - RATE_LIMIT_MAX_REQUESTS=${RATE_LIMIT_MAX_REQUESTS:-100}
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ml-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - gan-cube-network
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+    resources:
+      limits:
+        cpus: '2'
+        memory: 1G
+      reservations:
+        cpus: '1'
+        memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # MongoDB Database
+  mongo:
+    image: mongo:7.0
+    container_name: gan-cube-mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USER:-admin}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
+      - MONGO_INITDB_DATABASE=${MONGO_DB_NAME:-gan_cube_db}
+      - TZ=UTC
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test -u ${MONGO_ROOT_USER:-admin} -p ${MONGO_ROOT_PASSWORD} --authenticationDatabase admin
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - gan-cube-network
+    resources:
+      limits:
+        cpus: '2'
+        memory: 1.5G
+      reservations:
+        cpus: '1'
+        memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: gan-cube-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory ${REDIS_MAX_MEMORY:-512mb}
+      --maxmemory-policy ${REDIS_EVICTION_POLICY:-allkeys-lru}
+      --appendonly yes
+      --appendfsync everysec
+    environment:
+      - TZ=UTC
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - redis_data:/data
+    networks:
+      - gan-cube-network
+    resources:
+      limits:
+        cpus: '1'
+        memory: 512M
+      reservations:
+        cpus: '0.5'
+        memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ML Server (Python-based ML service)
+  ml-server:
+    image: gan-cube-ml:latest
+    build:
+      context: ./ml-server
+      dockerfile: Dockerfile
+    container_name: gan-cube-ml-server
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - ML_PORT=8000
+      - LOG_LEVEL=${ML_LOG_LEVEL:-info}
+      - MODEL_PATH=${MODEL_PATH:-/app/models}
+      - MONGODB_URI=mongodb://mongo:27017/${MONGO_DB_NAME:-gan_cube_db}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/${REDIS_ML_DB:-1}
+      - MAX_WORKERS=${ML_MAX_WORKERS:-4}
+      - BATCH_SIZE=${ML_BATCH_SIZE:-32}
+      - INFERENCE_TIMEOUT=${INFERENCE_TIMEOUT:-30}
+      - GPU_ENABLED=${GPU_ENABLED:-false}
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    volumes:
+      - ./ml-server/models:/app/models:ro
+      - ./ml-server/logs:/app/logs
+    networks:
+      - gan-cube-network
+    resources:
+      limits:
+        cpus: '4'
+        memory: 2G
+      reservations:
+        cpus: '2'
+        memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  gan-cube-network:
+    driver: bridge
+
+volumes:
+  mongo_data:
+    driver: local
+  mongo_config:
+    driver: local
+  redis_data:
+    driver: local
