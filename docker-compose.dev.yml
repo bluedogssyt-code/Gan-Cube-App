@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  # Node.js Application Service
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: gan-cube-app-dev
+    ports:
+      - "3000:3000"
+      - "9229:9229"  # Node.js debugging port
+    environment:
+      - NODE_ENV=development
+      - MONGODB_URI=mongodb://mongo:27017/gan-cube-app
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mongo
+      - redis
+    volumes:
+      - .:/app
+      - /app/node_modules
+    networks:
+      - gan-cube-network
+    restart: unless-stopped
+    command: npm run dev
+
+  # MongoDB Service
+  mongo:
+    image: mongo:6.0
+    container_name: gan-cube-mongo-dev
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=password
+      - MONGO_INITDB_DATABASE=gan-cube-app
+    volumes:
+      - mongo-data:/data/db
+      - mongo-config:/data/configdb
+      - ./init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js
+    networks:
+      - gan-cube-network
+    restart: unless-stopped
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Service
+  redis:
+    image: redis:7-alpine
+    container_name: gan-cube-redis-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - gan-cube-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongo-data:
+    driver: local
+  mongo-config:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  gan-cube-network:
+    driver: bridge
